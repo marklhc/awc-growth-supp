@@ -1,0 +1,690 @@
+---
+title: "Alignment in Growth Modeling: Neuroticism Example Using MIDUS"
+date: "January 2, 2021, Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    toc: true
+  github_document: 
+    html_preview: false
+    toc: true
+always_allow_html: true
+header-includes:
+  - \usepackage{booktabs}    
+---
+
+```{r midus-setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = "#>")
+options(knitr.table.format = "latex")
+```
+
+## Load Required Packages
+
+```{r load-packages, message=FALSE}
+library(here) # for setting working directory
+library(modelsummary) # for descriptive statistics
+library(lavaan) # for fitting SEM model
+library(sirt) # for alignment algorithm
+```
+
+## Download and Import Data
+
+First, download the MIDUS data from the following links (registration on ICPSUR is needed):
+
+- Wave I: https://www.icpsr.umich.edu/web/NACDA/studies/2760
+- Wave II: https://www.icpsr.umich.edu/web/NACDA/studies/4652
+- Wave III: https://www.icpsr.umich.edu/web/NACDA/studies/36346
+
+For each zip file, extract the .rda data file from the "DS0001" folder. Specifically, the data file names are
+
+- Wave I: "02760-0001-Data.rda"
+- Wave II:  "04652-0001-Data.rda"
+- Wave III: "36346-0001-Data.rda"
+
+```{r import-midus}
+# Import data (assuming rda data files are in the data directory)
+midus1_name <- load(here::here("data", "02760-0001-Data.rda"))
+midus2_name <- load(here::here("data", "04652-0001-Data.rda"))
+midus3_name <- load(here::here("data", "36346-0001-Data.rda"))
+# Select MIDUS 1 variables (ID, age, neuroticism items)
+midus1_df <- get(midus1_name)[, c(
+  "M2ID", "A1PRAGE_2019",
+  "A1SF4C", "A1SF4H",
+  "A1SF4M", "A1SF4S"
+)]
+# Select MIDUS 2 variables (ID, neuroticism items)
+midus2_df <- get(midus2_name)[, c(
+  "M2ID",
+  "B1SE6C", "B1SE6H",
+  "B1SE6M", "B1SE6S"
+)]
+# Select MIDUS 2 variables (ID, neuroticism items)
+midus3_df <- get(midus3_name)[, c(
+  "M2ID",
+  "C1SE6C", "C1SE6H",
+  "C1SE6M", "C1SE6S"
+)]
+# Merge data
+midus12_df <- merge(midus1_df,
+  y = midus2_df,
+  by.x = "M2ID", by.y = "M2ID",
+  all.x = TRUE, all.y = FALSE
+)
+midus123_df <- merge(midus12_df, midus3_df,
+  by.x = "M2ID", by.y = "M2ID",
+  all.x = TRUE, all.y = FALSE
+)
+```
+
+### Subset Data
+
+```{r midus_neurotic}
+# Extract Neuroticism variables, and rename
+midus_neurotic <-
+  with(
+    midus123_df,
+    data.frame(
+      m2id = M2ID,
+      age = A1PRAGE_2019,
+      moody1 = A1SF4C,
+      worry1 = A1SF4H,
+      nervous1 = A1SF4M,
+      calm1 = A1SF4S,
+      moody2 = B1SE6C,
+      worry2 = B1SE6H,
+      nervous2 = B1SE6M,
+      calm2 = B1SE6S,
+      moody3 = C1SE6C,
+      worry3 = C1SE6H,
+      nervous3 = C1SE6M,
+      calm3 = C1SE6S
+    )
+  )
+# Subset participants aged 55 or above in Wave 1
+midus_neurotic <- subset(midus_neurotic, age <= 40)
+# Drop missing data
+midus_neurotic <- na.omit(midus_neurotic)
+# Convert items from factor to numeric
+midus_neurotic[, 3:14] <-
+  lapply(midus_neurotic[, 3:14], as.numeric)
+# Recode so that higher scores indicate higher neuroticism
+# (4 to 1, 3 to 2, 2 to 3, 1 to 4)
+midus_neurotic[c(
+  "moody1", "worry1", "nervous1",
+  "moody2", "worry2", "nervous2",
+  "moody3", "worry3", "nervous3"
+)] <-
+  5 - midus_neurotic[c(
+    "moody1", "worry1", "nervous1",
+    "moody2", "worry2", "nervous2",
+    "moody3", "worry3", "nervous3"
+  )]
+```
+
+## Descriptive Statistics
+
+```{r desc}
+modelsummary::datasummary(
+  (moody1 + worry1 + nervous1 + calm1 +
+    moody2 + worry2 + nervous2 + calm2 +
+    moody3 + worry3 + nervous3 + calm3) ~
+  (Mean + SD + Median + Min + Max),
+  data = midus_neurotic
+)
+```
+
+
+## Longitudinal Configural Invariance Model
+
+### `lavaan` script
+
+```{r config_mod}
+config_mod <- "
+    eta1 =~ (lam11) * moody1 + (lam21) * worry1 + (lam31) * nervous1 +
+            (lam41) * calm1
+		eta2 =~ (lam12) * moody2 + (lam22) * worry2 + (lam32) * nervous2 +
+		        (lam42) * calm2
+		eta3 =~ (lam13) * moody3 + (lam23) * worry3 + (lam33) * nervous3 +
+		        (lam43) * calm3
+		# Measurement intercepts
+    moody1 ~ (nu11) * 1
+    worry1 ~ (nu21) * 1
+    nervous1 ~ (nu31) * 1
+    calm1 ~ (nu41) * 1
+    moody2 ~ (nu12) * 1
+    worry2 ~ (nu22) * 1
+    nervous2 ~ (nu32) * 1
+    calm2 ~ (nu42) * 1
+    moody3 ~ (nu13) * 1
+    worry3 ~ (nu23) * 1
+    nervous3 ~ (nu33) * 1
+    calm3 ~ (nu43) * 1
+    # Unique factor covariances
+    moody1 ~~ moody2 + moody3
+    moody2 ~~ moody3
+    worry1 ~~ worry2 + worry3
+    worry2 ~~ worry3
+    nervous1 ~~ nervous2 + nervous3
+    nervous2 ~~ nervous3
+    calm1 ~~ calm2 + calm3
+    calm2 ~~ calm3
+"
+```
+
+### Fit model in `lavaan`
+
+```{r config_fit}
+# Use lavaan::cfa() to fit a longitudinal configural model
+config_fit <- cfa(
+  config_mod,
+  data = midus_neurotic,
+  std.lv = TRUE # identify model by standardizing latent factors
+)
+# Uncomment to show model summary
+# summary(config_fit, fit.measures = TRUE, standardized = TRUE)
+```
+
+## Longitudinal Alignment Optimization
+
+```{r aligned_pars}
+# Extract loadings and intercepts for alignment
+lam_mat <- lavInspect(config_fit, what = "est")$lambda
+nu_vec <- lavInspect(config_fit, what = "est")$nu
+# Put them into T x p matrices
+num_items <- 4
+num_waves <- 3
+lam_config <- crossprod(lam_mat, rep(1, num_waves) %x% diag(num_items))
+nu_config <- matrix(nu_vec, nrow = num_waves, ncol = num_items, byrow = TRUE)
+# Add indicator names
+colnames(lam_config) <- colnames(nu_config) <-
+  c("moody", "worry", "nervous", "calm")
+# Alignment optimization
+aligned_pars <- sirt::invariance.alignment(
+  lambda = lam_config,
+  nu = nu_config,
+  fixed = TRUE
+)
+```
+
+The aligned loadings and intercepts are shown below:
+
+```{r tab-aligned_pars, echo=FALSE}
+opts <- options(knitr.kable.NA = "")
+library(magrittr)
+library(kableExtra)
+knitr::kable(
+  rbind(
+    "Loadings" = rep(NA, 4),
+    `rownames<-`(aligned_pars$lambda.aligned,
+                 paste0("Time", 1:3)),
+    "Intercepts" = rep(NA, 4),
+    `rownames<-`(aligned_pars$nu.aligned,
+                 paste0("Time", 1:3))
+  ),
+  format = "simple",
+  digits = 3L
+)
+```
+
+<!-- ### $R^2$ Effect Size -->
+
+```{r}
+# lam_resid <- lam_config - tcrossprod(aligned_pars$pars[ , 2],
+#                                      aligned_pars$itempars.aligned$M.lambda)
+# 1 - apply(lam_resid, 2, var) / apply(lam_config, 2, var)
+# Function for dMACS
+dmacs <- function(loadings, intercepts, pooled_item_sd,
+                  latent_mean = 0, latent_var = 1) {
+  dloading <- diff(loadings)
+  dintercept <- diff(intercepts)
+  integral <- dintercept^2 + 2 * dintercept * dloading * latent_mean +
+    dloading^2 * (latent_var + latent_mean^2)
+  sqrt(integral) / pooled_item_sd
+}
+# Use item SDs at first time point
+item_sds_wave1 <-
+  apply(
+    midus_neurotic[c("moody1", "worry1", "nervous1", "calm1")],
+    2, sd
+  )
+dmacs_pairwise <- function(loading_mat, intercept_mat, pooled_item_sd,
+                           latent_mean = 0, latent_var = 1) {
+  ngroups <- nrow(loading_mat)
+  pairs <- combn(ngroups, 2)
+  out <- matrix(NA, nrow = ncol(pairs), ncol = ncol(loading_mat))
+  for (i in seq_len(ncol(pairs))) {
+    out[i, ] <- dmacs(loading_mat[pairs[, i], ],
+      intercepts = intercept_mat[pairs[, i], ],
+      pooled_item_sd,
+      latent_mean,
+      latent_var
+    )
+  }
+  rownames(out) <- apply(pairs, 2, paste, collapse = " vs ")
+  colnames(out) <- colnames(loading_mat)
+  out
+}
+# All pairwise dMACS
+dmacs_pairwise(aligned_pars$lambda.aligned,
+  intercept_mat = aligned_pars$nu.aligned,
+  pooled_item_sd = item_sds_wave1,
+  latent_mean = 0,
+  latent_var = 1
+)
+```
+
+### An equivalent configural model with aligned loadings:
+
+```{r config_mod2}
+config_mod2 <- "
+    # (First loadings fixed to alignment solution)
+    eta1 =~ 0.4429136 * moody1 + (lam21) * worry1 + (lam31) * nervous1 +
+            (lam41) * calm1
+		eta2 =~ 0.4461272 * moody2 + (lam22) * worry2 + (lam32) * nervous2 +
+		        (lam42) * calm2
+		eta3 =~ 0.4615046 * moody3 + (lam23) * worry3 + (lam33) * nervous3 +
+		        (lam43) * calm3
+		# (First intercepts fixed to alignment solution)
+    moody1 ~ 2.600240 * 1
+    worry1 ~ (nu21) * 1
+    nervous1 ~ (nu31) * 1
+    calm1 ~ (nu41) * 1
+    moody2 ~ 2.682681 * 1
+    worry2 ~ (nu22) * 1
+    nervous2 ~ (nu32) * 1
+    calm2 ~ (nu42) * 1
+    moody3 ~ 2.792330 * 1
+    worry3 ~ (nu23) * 1
+    nervous3 ~ (nu33) * 1
+    calm3 ~ (nu43) * 1
+    # Unique factor covariances
+    moody1 ~~ moody2 + moody3
+    moody2 ~~ moody3
+    worry1 ~~ worry2 + worry3
+    worry2 ~~ worry3
+    nervous1 ~~ nervous2 + nervous3
+    nervous2 ~~ nervous3
+    calm1 ~~ calm2 + calm3
+    calm2 ~~ calm3
+    # Free latent means
+    eta1 + eta2 + eta3 ~ NA*1
+"
+```
+
+```{r config_fit2}
+# Use lavaan::cfa() to fit a longitudinal configural model
+config_fit2 <- cfa(
+  config_mod2,
+  data = midus_neurotic
+)
+# Uncomment to show model summary
+# summary(config_fit2, fit.measures = TRUE, standardized = TRUE)
+```
+
+Compare model fit (they're equivalent)
+
+```{r compare-config_fit_1vs2, warning = FALSE}
+anova(config_fit, config_fit2)
+```
+
+
+## Alignment-Within-CFA (AwC) Approach for Growth Modeling
+
+```{r awc_growth_mod}
+awc_growth_mod <- "
+        # (First loadings fixed to alignment solution)
+    eta1 =~ 0.4429136 * moody1 + (lam21) * worry1 + (lam31) * nervous1 +
+            (lam41) * calm1
+		eta2 =~ 0.4461272 * moody2 + (lam22) * worry2 + (lam32) * nervous2 +
+		        (lam42) * calm2
+		eta3 =~ 0.4615046 * moody3 + (lam23) * worry3 + (lam33) * nervous3 +
+		        (lam43) * calm3
+		# (First intercepts fixed to alignment solution)
+    moody1 ~ 2.399760 * 1
+    worry1 ~ (nu21) * 1
+    nervous1 ~ (nu31) * 1
+    calm1 ~ (nu41) * 1
+    moody2 ~ 2.317319 * 1
+    worry2 ~ (nu22) * 1
+    nervous2 ~ (nu32) * 1
+    calm2 ~ (nu42) * 1
+    moody3 ~ 2.207670 * 1
+    worry3 ~ (nu23) * 1
+    nervous3 ~ (nu33) * 1
+    calm3 ~ (nu43) * 1
+    # Unique factor covariances
+    moody1 ~~ moody2 + moody3
+    moody2 ~~ moody3
+    worry1 ~~ worry2 + worry3
+    worry2 ~~ worry3
+    nervous1 ~~ nervous2 + nervous3
+    nervous2 ~~ nervous3
+    calm1 ~~ calm2 + calm3
+    calm2 ~~ calm3
+    # Linear Growth Model
+    i =~ 1 * eta1 + 1 * eta2 + 1 * eta3
+    s =~ 0 * eta1 + 1 * eta2 + 2 * eta3
+    # Variance-covariances of intercepts and slopes
+    i ~~ i
+    s ~~ s
+    i ~~ s
+    # Means of level and slope
+    i ~ 1
+    s ~ 1
+    # Fixed disturbances of latent outcomes to zero
+    eta1 ~ 0 * 1
+    eta2 ~ 0 * 1
+    eta3 ~ 0 * 1
+"
+```
+
+### Fit model in `lavaan`
+
+```{r awc_growth_fit}
+# Use lavaan::sem() to fit a second-order growth model
+awc_growth_fit <- sem(
+  awc_growth_mod,
+  data = midus_neurotic
+)
+# Uncomment to show model summary
+# summary(awc_growth_fit, fit.measures = TRUE, standardized = TRUE)
+```
+
+### Parameter Estimates
+
+```{r pe-awc_growth_fit}
+lavaan::parameterEstimates(awc_growth_fit) %>%
+  subset(
+    lhs %in% c("i", "s") & substr(rhs, 1, 3) != "eta",
+    -label
+  ) %>%
+  knitr::kable(format = "simple", digits = 3L)
+```
+
+## Sensitivity Check: Identification Using Second Indicator
+
+```{r awc_growth_mod2}
+awc_growth_mod2 <- "
+    # (First loadings fixed to alignment solution)
+    eta1 =~ NA * moody1 + (lam11) * moody1 + 0.7855913 * worry1 +
+            (lam31) * nervous1 + (lam41) * calm1
+		eta2 =~ NA * moody2 + (lam12) * moody2 + 0.7975706 * worry2 +
+		        (lam32) * nervous2 + (lam42) * calm2
+		eta3 =~ NA * moody3 + (lam13) * moody3 + 0.7736944 * worry3 +
+		        (lam33) * nervous3 + (lam43) * calm3
+		# (First intercepts fixed to alignment solution)
+    moody1 ~ (nu11) * 1
+    worry1 ~ 2.618247 * 1
+    nervous1 ~ (nu31) * 1
+    calm1 ~ (nu41) * 1
+    moody2 ~ (nu12) * 1
+    worry2 ~ 2.629519 * 1
+    nervous2 ~ (nu32) * 1
+    calm2 ~ (nu42) * 1
+    moody3 ~ (nu13) * 1
+    worry3 ~ 2.617024 * 1
+    nervous3 ~ (nu33) * 1
+    calm3 ~ (nu43) * 1
+    # Unique factor covariances
+    moody1 ~~ moody2 + moody3
+    moody2 ~~ moody3
+    worry1 ~~ worry2 + worry3
+    worry2 ~~ worry3
+    nervous1 ~~ nervous2 + nervous3
+    nervous2 ~~ nervous3
+    calm1 ~~ calm2 + calm3
+    calm2 ~~ calm3
+    # Linear Growth Model
+    i =~ 1 * eta1 + 1 * eta2 + 1 * eta3
+    s =~ 0 * eta1 + 1 * eta2 + 2 * eta3
+    # Variance-covariances of intercepts and slopes
+    i ~~ i
+    s ~~ s
+    i ~~ s
+    # Means of level and slope
+    i ~ 1
+    s ~ 1
+    # Fixed disturbances of latent outcomes to zero
+    eta1 ~ 0 * 1
+    eta2 ~ 0 * 1
+    eta3 ~ 0 * 1
+"
+```
+
+### Fit model in `lavaan`
+
+```{r awc_growth_fit2}
+# Use lavaan::sem() to fit a second-order growth model
+awc_growth_fit2 <- sem(
+  awc_growth_mod2,
+  data = midus_neurotic
+)
+# Uncomment to show model summary
+# summary(awc_growth_fit, fit.measures = TRUE, standardized = TRUE)
+```
+
+### Parameter Estimates
+
+```{r pe-awc_growth_fit2}
+lavaan::parameterEstimates(awc_growth_fit2) %>%
+  subset(
+    lhs %in% c("i", "s") & substr(rhs, 1, 3) != "eta",
+    -label
+  ) %>%
+  knitr::kable(format = "simple", digits = 3L)
+```
+
+Note the smaller standard errors when using item 2 as the reference indicator, which has larger loadings. 
+
+## Traditional Invariance Testing
+
+### Weak and Strong Invariance
+
+```{r weak_mod}
+# Weak invariance model
+weak_mod <- "
+    eta1 =~ NA * moody1 + (lam1) * moody1 + (lam2) * worry1 + (lam3) * nervous1 + 
+            (lam4) * calm1
+		eta2 =~ NA * moody2 + (lam1) * moody2 + (lam2) * worry2 + (lam3) * nervous2 + 
+		        (lam4) * calm2
+		eta3 =~ NA * moody3 + (lam1) * moody3 + (lam2) * worry3 + (lam3) * nervous3 + 
+		        (lam4) * calm3
+		# Measurement intercepts
+    moody1 ~ (nu11) * 1
+    worry1 ~ (nu21) * 1
+    nervous1 ~ (nu31) * 1
+    calm1 ~ (nu41) * 1
+    moody2 ~ (nu12) * 1
+    worry2 ~ (nu22) * 1
+    nervous2 ~ (nu32) * 1
+    calm2 ~ (nu42) * 1
+    moody3 ~ (nu13) * 1
+    worry3 ~ (nu23) * 1
+    nervous3 ~ (nu33) * 1
+    calm3 ~ (nu43) * 1
+    # Unique factor covariances
+    moody1 ~~ moody2 + moody3
+    moody2 ~~ moody3
+    worry1 ~~ worry2 + worry3
+    worry2 ~~ worry3
+    nervous1 ~~ nervous2 + nervous3
+    nervous2 ~~ nervous3
+    calm1 ~~ calm2 + calm3
+    calm2 ~~ calm3
+    # First factor variance to 1
+    eta1 ~~ 1 * eta1
+"
+```
+
+```{r weak_fit}
+# Use lavaan::cfa() to fit a longitudinal configural model
+weak_fit <- cfa(
+  weak_mod, 
+  data = midus_neurotic
+)
+# Uncomment to show model summary
+# summary(weak_fit, fit.measures = TRUE, standardized = TRUE)
+```
+
+```{r strong_mod}
+# Strong invariance model
+strong_mod <- "
+    eta1 =~ NA * moody1 + (lam1) * moody1 + (lam2) * worry1 + (lam3) * nervous1 + 
+            (lam4) * calm1
+		eta2 =~ NA * moody2 + (lam1) * moody2 + (lam2) * worry2 + (lam3) * nervous2 + 
+		        (lam4) * calm2
+		eta3 =~ NA * moody3 + (lam1) * moody3 + (lam2) * worry3 + (lam3) * nervous3 + 
+		        (lam4) * calm3
+		# Measurement intercepts
+    moody1 ~ (nu1) * 1
+    worry1 ~ (nu2) * 1
+    nervous1 ~ (nu3) * 1
+    calm1 ~ (nu4) * 1
+    moody2 ~ (nu1) * 1
+    worry2 ~ (nu2) * 1
+    nervous2 ~ (nu3) * 1
+    calm2 ~ (nu4) * 1
+    moody3 ~ (nu1) * 1
+    worry3 ~ (nu2) * 1
+    nervous3 ~ (nu3) * 1
+    calm3 ~ (nu4) * 1
+    # Unique factor covariances
+    moody1 ~~ moody2 + moody3
+    moody2 ~~ moody3
+    worry1 ~~ worry2 + worry3
+    worry2 ~~ worry3
+    nervous1 ~~ nervous2 + nervous3
+    nervous2 ~~ nervous3
+    calm1 ~~ calm2 + calm3
+    calm2 ~~ calm3
+    # First factor variance and mean to 1 and 0
+    eta1 ~~ 1 * eta1
+    eta1 ~ 0
+    # Other factor means to free
+    eta2 ~ NA * 1
+    eta3 ~ NA * 1
+"
+```
+
+```{r strong_fit}
+# Use lavaan::cfa() to fit a longitudinal configural model
+strong_fit <- cfa(
+  strong_mod, 
+  data = midus_neurotic
+)
+# Uncomment to show model summary
+# summary(strong_fit, fit.measures = TRUE, standardized = TRUE)
+```
+
+```{r compare-fit}
+fit_tab <- lapply(
+  list("Configural" = config_fit, 
+       "Weak" = weak_fit, 
+       "Strong" = strong_fit),
+  fitmeasures,
+  fit.measures = c(
+    "chisq", "df", "rmsea",
+    "rmsea.ci.lower", "rmsea.ci.upper", 
+    "cfi", "tli", "srmr"
+  )
+)
+fit_tab <- do.call(rbind, fit_tab)
+knitr::kable(fit_tab, format = "simple", digits = 3)
+```
+
+Using modification indices, two items were identified to have noninvariant intercepts: `moody` in Wave 3 and `calm` in Wave 1.
+
+```{r mod}
+modindices(strong_fit, sort. = TRUE, free.remove = FALSE, min = 10)
+```
+
+### Partial Strong Invariance Model
+
+```{r pstrong_growth_fit}
+pstrong_growth_mod <- "
+    eta1 =~ NA * moody1 + (lam1) * moody1 + (lam2) * worry1 + (lam3) * nervous1 +
+            (lam4) * calm1
+		eta2 =~ NA * moody2 + (lam1) * moody2 + (lam2) * worry2 + (lam3) * nervous2 +
+		        (lam4) * calm2
+		eta3 =~ NA * moody3 + (lam1) * moody3 + (lam2) * worry3 + (lam3) * nervous3 +
+		        (lam4) * calm3
+		# Measurement intercepts
+    moody1 ~ (nu1) * 1
+    worry1 ~ (nu2) * 1
+    nervous1 ~ (nu3) * 1
+    calm1 ~ (nu41) * 1
+    moody2 ~ (nu1) * 1
+    worry2 ~ (nu2) * 1
+    nervous2 ~ (nu3) * 1
+    calm2 ~ (nu4) * 1
+    moody3 ~ (nu13) * 1
+    worry3 ~ (nu2) * 1
+    nervous3 ~ (nu3) * 1
+    calm3 ~ (nu4) * 1
+    # Unique factor covariances
+    moody1 ~~ moody2 + moody3
+    moody2 ~~ moody3
+    worry1 ~~ worry2 + worry3
+    worry2 ~~ worry3
+    nervous1 ~~ nervous2 + nervous3
+    nervous2 ~~ nervous3
+    calm1 ~~ calm2 + calm3
+    calm2 ~~ calm3
+    # Linear Growth Model
+    i =~ 1 * eta1 + 1 * eta2 + 1 * eta3
+    s =~ 0 * eta1 + 1 * eta2 + 2 * eta3
+    # Variance-covariances of intercepts and slopes
+    i ~~ phi1 * i
+    s ~~ s
+    i ~~ s
+    # Means of level (fixed to zero for identification) and slope
+    i ~ 0 * 1
+    s ~ 1
+    # Fixed disturbances of latent outcomes to zero
+    eta1 ~ 0 * 1
+    eta2 ~ 0 * 1
+    eta3 ~ 0 * 1
+    # Constrain total variance at Time 0 to 1
+    eta1 ~~ psi1 * eta1
+    psi1 + phi1 == 1
+"
+# Use lavaan::sem() to fit a second-order growth model
+pstrong_growth_fit <- sem(
+  pstrong_growth_mod,
+  data = midus_neurotic
+)
+```
+
+### Table comparing AwC growth model and partial strong invariance 2nd order growth model
+
+The growth parameter estimates of the two models are very similar. 
+
+```{r msummary}
+msummary(
+  list(
+    "AwC growth" = awc_growth_fit2,
+    "Partial strong invariance" = pstrong_growth_fit
+  ),
+  output = "markdown",
+  statistic = "conf.int",
+  coef_map = c(
+    "i ~1 " = "Mean(Level)",
+    "s ~1 " = "Mean(Slope)",
+    "i ~~ i" = "Var(Level)",
+    "s ~~ s" = "Var(Slope)",
+    "i ~~ s" = "Cov(Level, Slope)"
+  )
+)
+```
+
+\newpage
+
+## Version Information
+
+```{r, include=FALSE}
+options(width = 80)
+```
+
+```{r sinfo}
+sessionInfo()
+```
+
